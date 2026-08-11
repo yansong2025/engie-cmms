@@ -32,7 +32,7 @@ export function AnalyticsUpload() {
   }
 
   return (
-    <section id="analytics" className="border-b border-border bg-secondary/40 py-16 lg:py-24">
+    <section id="analytics" className="w-full py-16 lg:py-24">
       <div className="mx-auto max-w-6xl px-4 sm:px-6">
         <div className="grid items-start gap-10 lg:grid-cols-[1fr_1.1fr]">
           <div className="flex flex-col gap-4">
