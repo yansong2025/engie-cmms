@@ -3,13 +3,15 @@
 import type React from "react"
 import { useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
-import { UploadCloud, FileSpreadsheet, CheckCircle2, Loader2 } from "lucide-react"
+import { UploadCloud, FileSpreadsheet, CheckCircle2, Loader2, AlertCircle } from "lucide-react"
+import { supabase } from "@/lib/supabaseClient" // Adjust path if your lib is elsewhere
 
-type Status = "idle" | "analyzing" | "done"
+type Status = "idle" | "analyzing" | "done" | "error"
 
 export function AnalyticsUpload() {
   const [file, setFile] = useState<File | null>(null)
   const [status, setStatus] = useState<Status>("idle")
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [dragging, setDragging] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -19,14 +21,52 @@ export function AnalyticsUpload() {
     if (files && files.length > 0) {
       setFile(files[0])
       setStatus("idle")
+      setErrorMessage(null)
     }
   }
 
-  function analyze() {
+  async function analyze() {
     if (!canSubmit) return
+
     setStatus("analyzing")
-    // Simulated processing — wire this to your CMMS analytics endpoint.
-    setTimeout(() => setStatus("done"), 1800)
+    setErrorMessage(null)
+
+    try {
+      // 1. Generate unique file path
+      const filePath = `uploads/${Date.now()}_${file.name}`
+
+      // 2. Upload directly to Supabase 'raw-data' bucket
+      const { data, error: uploadError } = await supabase.storage
+        .from("raw-data")
+        .upload(filePath, file, {
+          cacheControl: "3600",
+          upsert: true,
+        })
+
+      if (uploadError) throw uploadError
+
+      console.log("File successfully uploaded to path:", data.path)
+
+      // 3. TODO: Trigger AWS Lambda here
+      /*
+      const response = await fetch('YOUR_AWS_LAMBDA_URL', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_path: data.path }),
+      });
+      
+      if (!response.ok) throw new Error("Failed to process file in Lambda");
+      
+      const result = await response.json();
+      console.log('PDF Public URL:', result.report_url);
+      */
+
+      setStatus("done")
+    } catch (error: any) {
+      console.error("Upload process failed:", error)
+      setErrorMessage(error.message || "An unknown error occurred during upload.")
+      setStatus("error")
+    }
   }
 
   return (
@@ -117,8 +157,8 @@ export function AnalyticsUpload() {
               <Button size="lg" disabled={!canSubmit} onClick={analyze} className="w-full">
                 {status === "analyzing" ? (
                   <>
-                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                    Analyzing…
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                    Uploading & Analyzing…
                   </>
                 ) : (
                   "Analyze"
@@ -130,9 +170,21 @@ export function AnalyticsUpload() {
                   role="status"
                   className="flex items-start gap-2 rounded-md bg-accent px-4 py-3 text-sm text-accent-foreground"
                 >
-                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
                   <span>
-                    Analysis complete. Your detailed report for <strong>{file?.name}</strong> is ready.
+                    Upload complete. Your detailed report for <strong>{file?.name}</strong> is ready.
+                  </span>
+                </div>
+              )}
+
+              {status === "error" && (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2 rounded-md bg-destructive/15 px-4 py-3 text-sm text-destructive"
+                >
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span>
+                    <strong>Upload failed:</strong> {errorMessage}
                   </span>
                 </div>
               )}
