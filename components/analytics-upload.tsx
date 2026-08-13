@@ -4,7 +4,7 @@ import type React from "react"
 import { useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { UploadCloud, FileSpreadsheet, CheckCircle2, Loader2, AlertCircle } from "lucide-react"
-import { supabase } from "@/lib/supabaseClient" // Adjust path if your lib is elsewhere
+import { supabase } from "@/lib/supabaseClient" // Adjust path if lib is elsewhere
 
 type Status = "idle" | "analyzing" | "done" | "error"
 
@@ -33,11 +33,12 @@ export function AnalyticsUpload() {
 
     try {
       // 1. Generate unique file path
-      const filePath = `uploads/${Date.now()}_${file.name}`
+      const cleanFileName = file.name.replace(/[^a-zA-Z0-9.-]/g, "_")
+const filePath = `${Date.now()}_${cleanFileName}`
 
       // 2. Upload directly to Supabase 'raw-data' bucket
       const { data, error: uploadError } = await supabase.storage
-        .from("raw-data")
+        .from("csv-uploads")
         .upload(filePath, file, {
           cacheControl: "3600",
           upsert: true,
