@@ -8,14 +8,12 @@ import { UploadCloud, FileSpreadsheet, CheckCircle2, Loader2 } from "lucide-reac
 type Status = "idle" | "analyzing" | "done"
 
 export function AnalyticsUpload() {
-  const [email, setEmail] = useState("")
   const [file, setFile] = useState<File | null>(null)
   const [status, setStatus] = useState<Status>("idle")
   const [dragging, setDragging] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
-  const canSubmit = emailValid && file && status !== "analyzing"
+  const canSubmit = file && status !== "analyzing"
 
   function handleFiles(files: FileList | null) {
     if (files && files.length > 0) {
@@ -44,7 +42,7 @@ export function AnalyticsUpload() {
             </h2>
             <p className="max-w-md text-pretty leading-relaxed text-muted-foreground">
               Drop in your meter exports or CMMS utility report. ENGIE Digital FM normalizes the data,
-              benchmarks consumption, and flags anomalies — then sends your results straight to your inbox.
+              benchmarks consumption, and flags anomalies — then shows your results in minutes.
             </p>
             <ul className="mt-2 flex flex-col gap-3 text-sm text-muted-foreground">
               {[
@@ -62,21 +60,6 @@ export function AnalyticsUpload() {
 
           <div className="rounded-xl border border-border bg-card p-6 shadow-sm sm:p-8">
             <div className="flex flex-col gap-5">
-              <div className="flex flex-col gap-2">
-                <label htmlFor="email" className="text-sm font-medium text-foreground">
-                  Work email
-                </label>
-                <input
-                  id="email"
-                  type="email"
-                  inputMode="email"
-                  placeholder="you@company.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="h-11 rounded-md border border-input bg-background px-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/40"
-                />
-              </div>
-
               <div className="flex flex-col gap-2">
                 <span className="text-sm font-medium text-foreground">Utility file</span>
                 <div
@@ -149,8 +132,7 @@ export function AnalyticsUpload() {
                 >
                   <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                   <span>
-                    Analysis complete. A detailed report for <strong>{file?.name}</strong> is on its way to{" "}
-                    <strong>{email}</strong>.
+                    Analysis complete. Your detailed report for <strong>{file?.name}</strong> is ready.
                   </span>
                 </div>
               )}
