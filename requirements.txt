@@ -1,0 +1,8 @@
+pandas
+openpyxl
+matplotlib
+numpy
+supabase
+fastapi
+pydantic
+python-multipart

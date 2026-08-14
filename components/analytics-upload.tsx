@@ -3,8 +3,14 @@
 import type React from "react"
 import { useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
-import { UploadCloud, FileSpreadsheet, CheckCircle2, Loader2, AlertCircle } from "lucide-react"
-import { supabase } from "@/lib/supabaseClient" // Adjust path if lib is elsewhere
+import {
+  UploadCloud,
+  FileSpreadsheet,
+  CheckCircle2,
+  Loader2,
+  AlertCircle,
+  Download,
+} from "lucide-react"
 
 type Status = "idle" | "analyzing" | "done" | "error"
 
@@ -12,6 +18,7 @@ export function AnalyticsUpload() {
   const [file, setFile] = useState<File | null>(null)
   const [status, setStatus] = useState<Status>("idle")
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null)
   const [dragging, setDragging] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -22,50 +29,45 @@ export function AnalyticsUpload() {
       setFile(files[0])
       setStatus("idle")
       setErrorMessage(null)
+      setPdfUrl(null)
     }
   }
 
   async function analyze() {
-    if (!canSubmit) return
+    if (!file || !canSubmit) return
 
     setStatus("analyzing")
     setErrorMessage(null)
+    setPdfUrl(null)
 
     try {
-      // 1. Generate unique file path
-      const cleanFileName = file.name.replace(/[^a-zA-Z0-9.-]/g, "_")
-const filePath = `${Date.now()}_${cleanFileName}`
+      // 1. Package file directly into FormData
+      const formData = new FormData()
+      formData.append("file", file)
 
-      // 2. Upload directly to Supabase 'raw-data' bucket
-      const { data, error: uploadError } = await supabase.storage
-        .from("csv-uploads")
-        .upload(filePath, file, {
-          cacheControl: "3600",
-          upsert: true,
-        })
+      // 2. Post directly to your Vercel Python function (/api/analyze)
+      const response = await fetch("/api/analyze", {
+        method: "POST",
+        body: formData, // Browser automatically configures multipart/form-data headers
+      })
 
-      if (uploadError) throw uploadError
+      const data = await response.json()
 
-      console.log("File successfully uploaded to path:", data.path)
+      if (!response.ok) {
+        throw new Error(data.detail || "Failed to process utility file")
+      }
 
-      // 3. TODO: Trigger AWS Lambda here
-      /*
-      const response = await fetch('YOUR_AWS_LAMBDA_URL', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file_path: data.path }),
-      });
-      
-      if (!response.ok) throw new Error("Failed to process file in Lambda");
-      
-      const result = await response.json();
-      console.log('PDF Public URL:', result.report_url);
-      */
+      if (!data.pdf_url) {
+        throw new Error("Report generated, but no download URL was returned.")
+      }
 
+      // 3. Save PDF URL & trigger auto-download in new tab
+      setPdfUrl(data.pdf_url)
       setStatus("done")
+      window.open(data.pdf_url, "_blank")
     } catch (error: any) {
-      console.error("Upload process failed:", error)
-      setErrorMessage(error.message || "An unknown error occurred during upload.")
+      console.error("Analysis process failed:", error)
+      setErrorMessage(error.message || "An unknown error occurred during analysis.")
       setStatus("error")
     }
   }
@@ -74,6 +76,7 @@ const filePath = `${Date.now()}_${cleanFileName}`
     <section id="analytics" className="w-full py-16 lg:py-24">
       <div className="mx-auto max-w-6xl px-4 sm:px-6">
         <div className="grid items-start gap-10 lg:grid-cols-[1fr_1.1fr]">
+          {/* Left Hero Description */}
           <div className="flex flex-col gap-4">
             <span className="text-sm font-semibold uppercase tracking-wider text-primary">
               CMMS Utility Analytics
@@ -99,6 +102,7 @@ const filePath = `${Date.now()}_${cleanFileName}`
             </ul>
           </div>
 
+          {/* Right Upload Box */}
           <div className="rounded-xl border border-border bg-card p-6 shadow-sm sm:p-8">
             <div className="flex flex-col gap-5">
               <div className="flex flex-col gap-2">
@@ -155,29 +159,46 @@ const filePath = `${Date.now()}_${cleanFileName}`
                 </div>
               </div>
 
+              {/* Action Button */}
               <Button size="lg" disabled={!canSubmit} onClick={analyze} className="w-full">
                 {status === "analyzing" ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
-                    Uploading & Analyzing…
+                    Analyzing Data & Generating Report…
                   </>
                 ) : (
-                  "Analyze"
+                  "Analyze & Generate PDF"
                 )}
               </Button>
 
+              {/* Success Banner */}
               {status === "done" && (
                 <div
                   role="status"
-                  className="flex items-start gap-2 rounded-md bg-accent px-4 py-3 text-sm text-accent-foreground"
+                  className="flex flex-col gap-3 rounded-md bg-accent p-4 text-sm text-accent-foreground"
                 >
-                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
-                  <span>
-                    Upload complete. Your detailed report for <strong>{file?.name}</strong> is ready.
-                  </span>
+                  <div className="flex items-start gap-2">
+                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+                    <span>
+                      Analysis complete! Your report for <strong>{file?.name}</strong> is ready.
+                    </span>
+                  </div>
+
+                  {pdfUrl && (
+                    <a
+                      href={pdfUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground shadow transition-colors hover:bg-primary/90"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      Open PDF Report
+                    </a>
+                  )}
                 </div>
               )}
 
+              {/* Error Banner */}
               {status === "error" && (
                 <div
                   role="alert"
@@ -185,7 +206,7 @@ const filePath = `${Date.now()}_${cleanFileName}`
                 >
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                   <span>
-                    <strong>Upload failed:</strong> {errorMessage}
+                    <strong>Analysis failed:</strong> {errorMessage}
                   </span>
                 </div>
               )}
