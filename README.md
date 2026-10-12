@@ -1,6 +1,6 @@
 # CMMS Utility Analytics
 
-Upload an interval meter export (CSV or XLSX) and get back headline metrics and a 3-page PDF report: cost and carbon estimates, data-quality checks, daily trend, weekday/weekend profile, a day-by-hour heatmap and flagged anomalies.
+Upload an interval meter export (CSV or XLSX) and get back headline metrics and a PDF report: cost and carbon estimates, data-quality checks, daily trend, weekday/weekend profile, a day-by-hour heatmap, typical-day profiles and anomaly events.
 
 Live: https://engie-cmms.vercel.app/
 
@@ -11,6 +11,8 @@ Live: https://engie-cmms.vercel.app/
 | Web page | `app/`, `components/` | Next.js upload form. Posts the file and rates to `/api/analyze`, shows the metrics, offers the PDF as a download. |
 | API | `api/analyze.py` | FastAPI function (deployed by Vercel as a Python serverless function). Validates the request and returns JSON with the metrics and the PDF, base64-encoded. |
 | Analysis | `analytics/core.py` | Reads the file, cleans it and computes the metrics. No web or plotting code. |
+| Anomaly events | `analytics/events.py` | Groups flagged readings into events with duration, excess kWh and cost. |
+| Day profiles | `analytics/profiles.py` | Clusters days by their 24-hour shape and lists the days that don't fit. |
 | Report | `analytics/report.py` | Renders the PDF with matplotlib. |
 
 Files are processed in memory and nothing is stored. There are no environment variables or external services to configure.
@@ -59,6 +61,8 @@ npm run build        # production build
 - **Cost and carbon** are consumption multiplied by the tariff and emission factor entered on the form. The defaults (0.15 per kWh, 0.4 kg CO2e per kWh) are placeholders, set in `api/analyze.py` and `components/analytics-upload.tsx`.
 - **Base load** is the 5th percentile of non-zero readings.
 - **Anomalies** are readings far from the median for the same hour of the week (robust z-score above 3.5). With too little data per hour of week, the comparison falls back to weekday/weekend hour, then to the whole period; the report states which was used.
+- **Anomaly events** are runs of flagged readings, joined across a single normal reading. Each has a start, duration, excess kWh over the typical level and cost. A lone flagged reading only counts as an event when it is extreme (robust z-score of 6 or more); milder one-offs are treated as noise.
+- **Typical-day profiles** come from k-means clustering of each complete day's 24 hourly totals, with one to four profiles chosen by silhouette score. A day is listed as unusual when it is far from every profile, or when it follows the other day type's profile (a weekday that ran like a weekend, as on a public holiday). Profiling needs at least seven complete days of hourly or finer data.
 - **Missing intervals** are inferred from the median gap between readings. Totals are not adjusted for them.
 
 ## Deployment

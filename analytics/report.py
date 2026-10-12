@@ -1,10 +1,12 @@
-"""Render an Analysis as a 3-page PDF."""
+"""Render an Analysis as a PDF report."""
 
 import io
 import textwrap
+from datetime import date, datetime
 
 import numpy as np
 from matplotlib import colormaps
+from matplotlib import dates as mdates
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.figure import Figure
 
@@ -26,6 +28,35 @@ def _insight_box(fig, y, lines, face, edge):
         0.1, y, text, fontsize=9, verticalalignment="bottom",
         bbox=dict(boxstyle="round,pad=0.5", facecolor=face, edgecolor=edge, alpha=0.9),
     )
+
+
+def _profile_line(a: Analysis) -> str:
+    if a.day_profiles is None:
+        return "not enough data"
+    return (
+        f"{len(a.day_profiles['profiles'])} typical, "
+        f"{len(a.day_profiles['unusual_days'])} unusual day(s)"
+    )
+
+
+def _duration(minutes: int) -> str:
+    hours, mins = divmod(minutes, 60)
+    return f"{hours} h {mins:02d} min" if hours else f"{mins} min"
+
+
+def _table(ax, columns, rows, widths):
+    ax.axis("off")
+    table = ax.table(cellText=rows, colLabels=columns, colWidths=widths, loc="upper center",
+                     cellLoc="left")
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1, 1.5)
+    for (row, _), cell in table.get_celld().items():
+        cell.set_edgecolor("#d0d7de")
+        if row == 0:
+            cell.set_facecolor("#f0f4f8")
+            cell.set_text_props(fontweight="bold")
+    return table
 
 
 def _summary_page(a: Analysis) -> Figure:
@@ -54,15 +85,17 @@ def _summary_page(a: Analysis) -> Figure:
         f"  Missing Intervals  : {q['missing_intervals']:,} in {q['gaps']} gap(s), "
         f"longest {q['longest_gap_hours']:g} h\n"
         f"  Zero Readings      : {q['zero_readings']:,}\n"
-        f"  Anomalies          : {m['anomalies_high']} high, {m['anomalies_low']} low "
+        f"  Anomaly Events     : {m['anomaly_events_high']} high, {m['anomaly_events_low']} low "
         f"(vs. typical for {m['anomaly_basis']})\n"
+        f"  Excess In Events   : {m['anomaly_excess_kwh']:,.2f} kWh ({m['anomaly_excess_cost']:,.2f})\n"
+        f"  Day Profiles       : {_profile_line(a)}\n"
         f"{rule}"
     )
     fig.text(0.1, 0.90, summary_text, fontsize=9, family="monospace", verticalalignment="top")
 
     if a.notes:
         wrapped = "\n".join(textwrap.fill(f"Note: {n}", 100) for n in a.notes)
-        fig.text(0.1, 0.52, wrapped, fontsize=8, color="#8a4b00", verticalalignment="top")
+        fig.text(0.1, 0.50, wrapped, fontsize=8, color="#8a4b00", verticalalignment="top")
 
     ax = fig.add_axes([0.1, 0.07, 0.8, 0.34])
     # Rasterized: tens of thousands of vector segments would bloat the PDF.
@@ -71,10 +104,10 @@ def _summary_page(a: Analysis) -> Figure:
     high, low = df[df["anomaly"] == 1], df[df["anomaly"] == -1]
     if not high.empty:
         ax.scatter(high["datetime"], high["consumption"], color="#d7191c", s=14, zorder=5,
-                   label="Unusually high")
+                   label="Anomaly event (high)")
     if not low.empty:
         ax.scatter(low["datetime"], low["consumption"], color="#e6850d", s=14, zorder=5,
-                   marker="v", label="Unusually low")
+                   marker="v", label="Anomaly event (low)")
     ax.set_title("Interval Consumption & Anomalies", fontweight="bold")
     ax.set_ylabel("kWh per reading")
     ax.legend(loc="upper right", fontsize=8)
@@ -155,9 +188,116 @@ def _heatmap_page(a: Analysis) -> Figure:
     return fig
 
 
+PROFILE_COLORS = ["#2c7bb6", "#d7191c", "#1a9641", "#7b3294"]
+MAX_TABLE_ROWS = 12
+
+
+def _profiles_page(a: Analysis) -> Figure:
+    profiles = a.day_profiles["profiles"]
+    unusual = a.day_profiles["unusual_days"]
+    colors = {p["label"]: PROFILE_COLORS[i] for i, p in enumerate(profiles)}
+
+    fig = Figure(figsize=PAGE_SIZE)
+    fig.text(0.1, 0.95, "TYPICAL-DAY PROFILES", fontsize=14, fontweight="bold")
+
+    ax = fig.add_axes([0.1, 0.65, 0.8, 0.25])
+    for day in unusual:
+        ax.plot(range(24), day["hourly_kwh"], color="#9aa0a6", linewidth=0.9, linestyle="--")
+    if unusual:
+        ax.plot([], [], color="#9aa0a6", linewidth=0.9, linestyle="--", label="Unusual days")
+    for p in profiles:
+        ax.plot(range(24), p["hourly_kwh"], color=colors[p["label"]], linewidth=2.2, marker="o",
+                markersize=3,
+                label=f"Profile {p['label']}: {p['days']} days, {p['description']}, "
+                      f"avg {p['avg_daily_kwh']:,.0f} kWh/day")
+    ax.set_title("Average Day Shape per Profile", fontweight="bold")
+    ax.set_xlabel("Hour of Day")
+    ax.set_ylabel("kWh per hour")
+    ax.set_xticks(range(24))
+    # Below the chart, so it never covers the lines.
+    ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(0, -0.2), frameon=False)
+    _style(ax)
+
+    # One marker per day, coloured by profile, so runs and odd days stand out.
+    strip = fig.add_axes([0.1, 0.43, 0.8, 0.04])
+    for item in a.day_profiles["assignments"]:
+        strip.scatter(date.fromisoformat(item["date"]), 0, marker="X" if item["unusual"] else "s",
+                      s=70, color="#333333" if item["unusual"] else colors[item["profile"]])
+    strip.set_yticks([])
+    strip.set_title("Profile by date (X = unusual day)", fontsize=9, loc="left")
+    strip.spines[["top", "right", "left"]].set_visible(False)
+    strip.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=8))
+    strip.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+    strip.tick_params(axis="x", labelsize=8)
+
+    table_ax = fig.add_axes([0.1, 0.05, 0.8, 0.30])
+    if unusual:
+        rows = [
+            [
+                f"{d['date']} {d['day']}",
+                d["reason"],
+                f"{d['total_kwh']:,.0f}",
+                "n/a" if d["diff_pct"] is None else f"{d['diff_pct']:+.0f}% vs {d['compared_to']}",
+                d["main_difference"],
+            ]
+            for d in unusual[:MAX_TABLE_ROWS]
+        ]
+        _table(table_ax, ["Date", "Why", "kWh", "Day total", "Largest difference"], rows,
+               [0.17, 0.33, 0.09, 0.15, 0.26])
+        table_ax.set_title(f"Unusual days ({len(unusual)})", fontweight="bold", loc="left")
+    else:
+        table_ax.axis("off")
+        table_ax.text(0, 0.9, "No unusual days: every day fits one of the profiles above.",
+                      fontsize=10)
+    return fig
+
+
+def _events_page(a: Analysis) -> Figure:
+    m = a.metrics
+    fig = Figure(figsize=PAGE_SIZE)
+    fig.text(0.1, 0.95, "ANOMALY EVENTS", fontsize=14, fontweight="bold")
+
+    worst = a.events[0]
+    start = datetime.fromisoformat(worst["start"])
+    intro = (
+        f"{len(a.events)} event(s): runs of readings well away from what is typical for that "
+        f"{m['anomaly_basis']}. High events total {m['anomaly_excess_kwh']:,.0f} kWh above "
+        f"expected ({m['anomaly_excess_cost']:,.2f}). Largest: {start:%d %b %H:%M}, "
+        f"{_duration(worst['duration_minutes'])}, {worst['excess_kwh']:+,.0f} kWh."
+    )
+    fig.text(0.1, 0.92, textwrap.fill(intro, 105), fontsize=9, verticalalignment="top")
+
+    rows = [
+        [
+            f"{datetime.fromisoformat(e['start']):%Y-%m-%d %H:%M}",
+            _duration(e["duration_minutes"]),
+            e["direction"].capitalize(),
+            f"{e['peak_kwh']:,.1f}",
+            f"{e['expected_kwh']:,.1f}",
+            f"{e['actual_kwh']:,.1f}",
+            f"{e['excess_kwh']:+,.1f}",
+            f"{e['cost']:+,.2f}",
+        ]
+        for e in a.events[:25]
+    ]
+    ax = fig.add_axes([0.1, 0.08, 0.8, 0.76])
+    _table(ax, ["Start", "Duration", "Type", "Peak kWh", "Expected kWh", "Actual kWh",
+                "Excess kWh", "Cost"], rows, [0.2, 0.13, 0.08, 0.11, 0.14, 0.12, 0.12, 0.1])
+    if len(a.events) > len(rows):
+        fig.text(0.1, 0.05, f"Showing the {len(rows)} largest of {len(a.events)} events.",
+                 fontsize=8)
+    return fig
+
+
 def build_pdf(analysis: Analysis) -> bytes:
+    pages = [_summary_page, _trend_page, _heatmap_page]
+    if analysis.day_profiles:
+        pages.append(_profiles_page)
+    if analysis.events:
+        pages.append(_events_page)
+
     buffer = io.BytesIO()
     with PdfPages(buffer) as pdf:
-        for page in (_summary_page, _trend_page, _heatmap_page):
+        for page in pages:
             pdf.savefig(page(analysis), dpi=150)
     return buffer.getvalue()
