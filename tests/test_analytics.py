@@ -58,6 +58,42 @@ def test_xlsx_with_header_on_second_row():
     assert result.quality["rows_used"] == len(df)
 
 
+def test_original_cmms_layout_title_row_then_header_on_second_row():
+    """The layout the first version was built for: xlsx, title row, header on row 2,
+    a date-like column and a "Consumption" column among others."""
+    df = make_frame(days=7, freq="30min")
+    sheet = pd.DataFrame(
+        {
+            "Meter": "MTR-01",
+            "Reading Date": df["datetime"],
+            "Consumption": df["consumption"],
+            "Unit": "kWh",
+        }
+    )
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer) as writer:
+        sheet.to_excel(writer, index=False, startrow=1)
+        # A title row that itself mentions both keywords in separate cells.
+        writer.sheets["Sheet1"]["A1"] = "Utility Consumption Report"
+        writer.sheets["Sheet1"]["B1"] = "Export Date: 01/07/2026"
+    content = buffer.getvalue()
+
+    # What the first version did: header fixed on the second row.
+    legacy = pd.read_excel(io.BytesIO(content), header=1)
+    result = run(read_table(content, "export.xlsx"))
+
+    assert result.quality["rows_used"] == len(legacy) == len(df)
+    assert result.metrics["total_kwh"] == pytest.approx(legacy["Consumption"].sum(), abs=0.01)
+    assert result.metrics["period_start"] == legacy["Reading Date"].min().isoformat()
+
+
+def test_original_csv_layout_header_on_first_row():
+    df = make_frame(days=7, freq="1h")
+    result = run(read_table(to_csv(df, header=("Date", "Consumption")), "export.csv"))
+    assert result.quality["rows_used"] == len(df)
+    assert result.metrics["total_kwh"] == pytest.approx(df["consumption"].sum(), abs=0.01)
+
+
 def test_missing_columns_error_names_what_was_found():
     with pytest.raises(AnalysisError, match="Reading, Value"):
         read_table(b"Reading,Value\n1,2\n", "meter.csv")

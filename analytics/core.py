@@ -13,9 +13,10 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-DATE_KEYWORDS = ("datetime", "timestamp", "date", "time", "period")
+DATE_KEYWORDS = ("datetime", "timestamp", "date", "time")
 CONSUMPTION_KEYWORDS = ("consumption", "kwh", "usage", "energy")
 HEADER_SCAN_ROWS = 20
+HEADER_PROBE_ROWS = 5
 
 BASELOAD_PERCENTILE = 5
 ANOMALY_Z = 3.5
@@ -90,6 +91,17 @@ def _pick_columns(header: list) -> tuple:
     return date_idx, consumption_idx
 
 
+def _has_readings(sample: pd.DataFrame) -> bool:
+    """True if any row holds both a parseable date and a number."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        dates = pd.to_datetime(sample["datetime"].astype("string"), errors="coerce")
+    values = pd.to_numeric(
+        sample["consumption"].astype("string").str.replace(",", "", regex=False), errors="coerce"
+    )
+    return bool((dates.notna() & values.notna()).any())
+
+
 def read_table(file_bytes: bytes, filename: str) -> pd.DataFrame:
     """Load a CSV/XLSX export and return a raw two-column frame: datetime, consumption."""
     name = (filename or "").lower()
@@ -114,14 +126,23 @@ def read_table(file_bytes: bytes, filename: str) -> pd.DataFrame:
     if raw.empty:
         raise AnalysisError("The file contains no rows.")
 
-    # The header is the first row naming both a date and a consumption column.
+    # The header is the first row naming both a date and a consumption column
+    # that is followed by actual readings. Checking for readings stops a title
+    # row such as "Consumption Report | Export Date: ..." being taken as the header.
+    fallback = None
     for row_idx in range(min(HEADER_SCAN_ROWS, len(raw))):
-        header = raw.iloc[row_idx].tolist()
-        date_idx, consumption_idx = _pick_columns(header)
-        if date_idx is not None and consumption_idx is not None:
-            data = raw.iloc[row_idx + 1 :, [date_idx, consumption_idx]].copy()
-            data.columns = ["datetime", "consumption"]
-            return data.reset_index(drop=True)
+        date_idx, consumption_idx = _pick_columns(raw.iloc[row_idx].tolist())
+        if date_idx is None or consumption_idx is None:
+            continue
+        data = raw.iloc[row_idx + 1 :, [date_idx, consumption_idx]].copy()
+        data.columns = ["datetime", "consumption"]
+        data = data.reset_index(drop=True)
+        if _has_readings(data.head(HEADER_PROBE_ROWS)):
+            return data
+        if fallback is None:
+            fallback = data
+    if fallback is not None:
+        return fallback
 
     found = [str(c).strip() for c in raw.iloc[0].tolist() if pd.notna(c) and str(c).strip()]
     raise AnalysisError(

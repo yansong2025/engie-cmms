@@ -19,7 +19,7 @@ Files are processed in memory and nothing is stored. There are no environment va
 
 - **Format:** `.csv` or `.xlsx`, up to 4 MB (Vercel rejects larger request bodies).
 - **Columns:** one date/time column and one consumption column in kWh per reading. They are found by name:
-  - date/time: a name containing `datetime`, `timestamp`, `date`, `time` or `period`
+  - date/time: a name containing `datetime`, `timestamp`, `date` or `time`
   - consumption: a name containing `consumption`, `kwh`, `usage` or `energy`
 - **Header row:** may be anywhere in the first 20 rows, so title rows above it are fine.
 - **Dates:** `YYYY-MM-DD HH:MM` is safest. `DD/MM/YYYY` and `MM/DD/YYYY` are both detected from the data; if a file is genuinely ambiguous, `DD/MM` is assumed and the report says so.
