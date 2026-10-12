@@ -6,6 +6,8 @@ Live: https://engie-cmms.vercel.app/
 
 ## How it works
 
+![Architecture: the browser uploads a meter export over HTTPS to a Python analysis function on Vercel, which returns the figures and PDF; nothing is stored](docs/architecture.png)
+
 | Part | Where | What it does |
 | --- | --- | --- |
 | Web page | `app/`, `components/` | Next.js upload form. Posts the file and rates to `/api/analyze`, shows the metrics, offers the PDF as a download. |
