@@ -13,9 +13,13 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-DATE_KEYWORDS = ("datetime", "timestamp", "date", "time", "period")
+from .events import build_events
+from .profiles import day_profiles
+
+DATE_KEYWORDS = ("datetime", "timestamp", "date", "time")
 CONSUMPTION_KEYWORDS = ("consumption", "kwh", "usage", "energy")
 HEADER_SCAN_ROWS = 20
+HEADER_PROBE_ROWS = 5
 
 BASELOAD_PERCENTILE = 5
 ANOMALY_Z = 3.5
@@ -35,18 +39,27 @@ class AnalysisError(ValueError):
 
 @dataclass
 class Analysis:
-    df: pd.DataFrame  # datetime, consumption, day_of_week, hour, is_weekend, anomaly
+    # datetime, consumption, day_of_week, hour, is_weekend, expected, z, anomaly
+    df: pd.DataFrame
     daily: pd.DataFrame  # date, consumption, complete, rolling_7d
     hourly_weekday: pd.Series  # indexed 0-23, NaN where no data
     hourly_weekend: pd.Series
     heatmap: pd.DataFrame  # 7 x 24, NaN where no data
     metrics: dict
     quality: dict
+    events: list = field(default_factory=list)  # anomaly events, largest excess first
+    day_profiles: dict | None = None  # None when the data is too coarse or short
     notes: list = field(default_factory=list)
 
     def summary(self) -> dict:
         """JSON-safe view for the API response."""
-        return {"metrics": self.metrics, "quality": self.quality, "notes": self.notes}
+        return {
+            "metrics": self.metrics,
+            "quality": self.quality,
+            "events": self.events,
+            "day_profiles": self.day_profiles,
+            "notes": self.notes,
+        }
 
 
 # ------------------------------------------------------------------------------
@@ -90,6 +103,17 @@ def _pick_columns(header: list) -> tuple:
     return date_idx, consumption_idx
 
 
+def _has_readings(sample: pd.DataFrame) -> bool:
+    """True if any row holds both a parseable date and a number."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        dates = pd.to_datetime(sample["datetime"].astype("string"), errors="coerce")
+    values = pd.to_numeric(
+        sample["consumption"].astype("string").str.replace(",", "", regex=False), errors="coerce"
+    )
+    return bool((dates.notna() & values.notna()).any())
+
+
 def read_table(file_bytes: bytes, filename: str) -> pd.DataFrame:
     """Load a CSV/XLSX export and return a raw two-column frame: datetime, consumption."""
     name = (filename or "").lower()
@@ -114,14 +138,23 @@ def read_table(file_bytes: bytes, filename: str) -> pd.DataFrame:
     if raw.empty:
         raise AnalysisError("The file contains no rows.")
 
-    # The header is the first row naming both a date and a consumption column.
+    # The header is the first row naming both a date and a consumption column
+    # that is followed by actual readings. Checking for readings stops a title
+    # row such as "Consumption Report | Export Date: ..." being taken as the header.
+    fallback = None
     for row_idx in range(min(HEADER_SCAN_ROWS, len(raw))):
-        header = raw.iloc[row_idx].tolist()
-        date_idx, consumption_idx = _pick_columns(header)
-        if date_idx is not None and consumption_idx is not None:
-            data = raw.iloc[row_idx + 1 :, [date_idx, consumption_idx]].copy()
-            data.columns = ["datetime", "consumption"]
-            return data.reset_index(drop=True)
+        date_idx, consumption_idx = _pick_columns(raw.iloc[row_idx].tolist())
+        if date_idx is None or consumption_idx is None:
+            continue
+        data = raw.iloc[row_idx + 1 :, [date_idx, consumption_idx]].copy()
+        data.columns = ["datetime", "consumption"]
+        data = data.reset_index(drop=True)
+        if _has_readings(data.head(HEADER_PROBE_ROWS)):
+            return data
+        if fallback is None:
+            fallback = data
+    if fallback is not None:
+        return fallback
 
     found = [str(c).strip() for c in raw.iloc[0].tolist() if pd.notna(c) and str(c).strip()]
     raise AnalysisError(
@@ -241,7 +274,8 @@ def _clean(raw: pd.DataFrame, notes: list) -> tuple:
 def _flag_anomalies(df: pd.DataFrame) -> tuple:
     """Flag readings far from what is typical for that time of the week.
 
-    Returns (flags, basis) where flags is +1 (high), -1 (low) or 0.
+    Returns (flags, expected, z, basis): flags is +1 (high), -1 (low) or 0,
+    expected is the typical reading for that time, z the robust distance from it.
     """
     by_hour_of_week = [df["day_of_week"], df["hour"]]
     by_day_type = [df["is_weekend"], df["hour"]]
@@ -263,7 +297,7 @@ def _flag_anomalies(df: pd.DataFrame) -> tuple:
     spread = np.maximum(1.4826 * mad, np.maximum(median * ANOMALY_MIN_SPREAD, floor))
     z = (df["consumption"] - median) / spread
     flags = np.where(z > ANOMALY_Z, 1, np.where(z < -ANOMALY_Z, -1, 0))
-    return pd.Series(flags, index=df.index), basis
+    return pd.Series(flags, index=df.index), median, z, basis
 
 
 def _number(value, digits=2):
@@ -284,7 +318,13 @@ def analyze(raw: pd.DataFrame, tariff: float, emission_factor: float) -> Analysi
     df["day_of_week"] = df["datetime"].dt.dayofweek
     df["hour"] = df["datetime"].dt.hour
     df["is_weekend"] = df["day_of_week"] >= 5
-    df["anomaly"], anomaly_basis = _flag_anomalies(df)
+    df["anomaly"], df["expected"], df["z"], anomaly_basis = _flag_anomalies(df)
+
+    # Report anomalies as events; flagged readings that form no event are noise.
+    interval = pd.Timedelta(minutes=quality["interval_minutes"])
+    events, in_event = build_events(df, interval, tariff)
+    df.loc[~in_event, "anomaly"] = 0
+    high_events = [e for e in events if e["direction"] == "high"]
 
     consumption = df["consumption"]
     total_kwh = consumption.sum()
@@ -294,10 +334,11 @@ def analyze(raw: pd.DataFrame, tariff: float, emission_factor: float) -> Analysi
     positive = consumption[consumption > 0]
 
     # Daily totals; days with too few readings would look like dips in the trend.
-    readings_per_day = pd.Timedelta(days=1) / pd.Timedelta(minutes=quality["interval_minutes"])
+    readings_per_day = pd.Timedelta(days=1) / interval
     by_date = df.groupby(df["datetime"].dt.date)["consumption"]
     daily = by_date.sum().rename("consumption").reset_index().rename(columns={"datetime": "date"})
     daily["complete"] = (by_date.size() >= readings_per_day * COMPLETE_DAY_SHARE).to_numpy()
+    complete_dates = daily.loc[daily["complete"], "date"].tolist()
     if daily["complete"].any():
         incomplete = int((~daily["complete"]).sum())
         if incomplete:
@@ -335,8 +376,10 @@ def analyze(raw: pd.DataFrame, tariff: float, emission_factor: float) -> Analysi
         "peak_kwh": _number(max_reading, 3),
         "peak_at": peak_row["datetime"].isoformat(),
         "load_factor_pct": _number(avg_reading / max_reading * 100 if max_reading > 0 else 0),
-        "anomalies_high": int((df["anomaly"] == 1).sum()),
-        "anomalies_low": int((df["anomaly"] == -1).sum()),
+        "anomaly_events_high": len(high_events),
+        "anomaly_events_low": len(events) - len(high_events),
+        "anomaly_excess_kwh": _number(sum(e["excess_kwh"] for e in high_events)),
+        "anomaly_excess_cost": _number(sum(e["cost"] for e in high_events)),
         "anomaly_basis": anomaly_basis,
         "weekday_vs_weekend_pct": _number(weekday_vs_weekend_pct, 1),
         "weekday_peak_hour": int(hourly_weekday.idxmax()) if hourly_weekday.notna().any() else None,
@@ -352,5 +395,7 @@ def analyze(raw: pd.DataFrame, tariff: float, emission_factor: float) -> Analysi
         heatmap=heatmap,
         metrics=metrics,
         quality=quality,
+        events=events,
+        day_profiles=day_profiles(df, complete_dates, quality["interval_minutes"]),
         notes=notes,
     )

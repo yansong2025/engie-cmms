@@ -25,17 +25,30 @@ type AnalysisResult = {
     peak_at: string
     base_load_kwh: number
     load_factor_pct: number
-    anomalies_high: number
-    anomalies_low: number
+    anomaly_events_high: number
+    anomaly_events_low: number
+    anomaly_excess_kwh: number
   }
   quality: {
     rows_read: number
     rows_used: number
     missing_intervals: number
   }
+  events: {
+    start: string
+    duration_minutes: number
+    direction: "high" | "low"
+    excess_kwh: number
+  }[]
+  day_profiles: {
+    profiles: { label: string; days: number; description: string; avg_daily_kwh: number }[]
+    unusual_days: { date: string; day: string; reason: string; main_difference: string }[]
+  } | null
   notes: string[]
   pdf_base64: string
 }
+
+const MAX_LISTED = 3
 
 // Keep in sync with MAX_FILE_BYTES in api/analyze.py.
 const MAX_FILE_BYTES = 4 * 1024 * 1024
@@ -44,6 +57,12 @@ const DEFAULT_TARIFF = "0.15"
 const DEFAULT_EMISSION_FACTOR = "0.4"
 
 const numberFormat = new Intl.NumberFormat("en", { maximumFractionDigits: 1 })
+
+function formatDuration(minutes: number) {
+  const hours = Math.floor(minutes / 60)
+  const mins = minutes % 60
+  return hours ? `${hours} h ${mins.toString().padStart(2, "0")} min` : `${mins} min`
+}
 
 function validateFile(file: File): string | null {
   const name = file.name.toLowerCase()
@@ -314,8 +333,8 @@ export function AnalyticsUpload() {
                       ["Peak reading", `${numberFormat.format(result.metrics.peak_kwh)} kWh`],
                       ["Load factor", `${numberFormat.format(result.metrics.load_factor_pct)}%`],
                       [
-                        "Anomalies",
-                        `${result.metrics.anomalies_high} high · ${result.metrics.anomalies_low} low`,
+                        "Anomaly events",
+                        `${result.metrics.anomaly_events_high} high · ${result.metrics.anomaly_events_low} low`,
                       ],
                     ].map(([label, value]) => (
                       <div key={label} className="rounded-md bg-background/70 p-3">
@@ -324,6 +343,47 @@ export function AnalyticsUpload() {
                       </div>
                     ))}
                   </dl>
+
+                  {result.events.length > 0 && (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-xs font-semibold text-foreground">
+                        Largest anomaly events
+                      </span>
+                      <ul className="flex flex-col gap-1 text-xs text-muted-foreground">
+                        {result.events.slice(0, MAX_LISTED).map((event) => (
+                          <li key={event.start} className="tabular-nums">
+                            {event.start.slice(0, 16).replace("T", " ")} ·{" "}
+                            {formatDuration(event.duration_minutes)} ·{" "}
+                            {event.excess_kwh > 0 ? "+" : ""}
+                            {numberFormat.format(event.excess_kwh)} kWh vs typical
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {result.day_profiles && (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-xs font-semibold text-foreground">
+                        Typical days: {result.day_profiles.profiles.length} profile(s),{" "}
+                        {result.day_profiles.unusual_days.length} unusual day(s)
+                      </span>
+                      <ul className="flex flex-col gap-1 text-xs text-muted-foreground">
+                        {result.day_profiles.profiles.map((profile) => (
+                          <li key={profile.label}>
+                            Profile {profile.label}: {profile.days} days, {profile.description}, avg{" "}
+                            {numberFormat.format(profile.avg_daily_kwh)} kWh/day
+                          </li>
+                        ))}
+                        {result.day_profiles.unusual_days.slice(0, MAX_LISTED).map((day) => (
+                          <li key={day.date}>
+                            Unusual: {day.date} ({day.day}) — {day.reason.toLowerCase()},{" "}
+                            {day.main_difference}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
 
                   {result.notes.length > 0 && (
                     <ul className="flex flex-col gap-1 text-xs text-muted-foreground">

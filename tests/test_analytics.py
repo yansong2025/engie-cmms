@@ -58,6 +58,42 @@ def test_xlsx_with_header_on_second_row():
     assert result.quality["rows_used"] == len(df)
 
 
+def test_original_cmms_layout_title_row_then_header_on_second_row():
+    """The layout the first version was built for: xlsx, title row, header on row 2,
+    a date-like column and a "Consumption" column among others."""
+    df = make_frame(days=7, freq="30min")
+    sheet = pd.DataFrame(
+        {
+            "Meter": "MTR-01",
+            "Reading Date": df["datetime"],
+            "Consumption": df["consumption"],
+            "Unit": "kWh",
+        }
+    )
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer) as writer:
+        sheet.to_excel(writer, index=False, startrow=1)
+        # A title row that itself mentions both keywords in separate cells.
+        writer.sheets["Sheet1"]["A1"] = "Utility Consumption Report"
+        writer.sheets["Sheet1"]["B1"] = "Export Date: 01/07/2026"
+    content = buffer.getvalue()
+
+    # What the first version did: header fixed on the second row.
+    legacy = pd.read_excel(io.BytesIO(content), header=1)
+    result = run(read_table(content, "export.xlsx"))
+
+    assert result.quality["rows_used"] == len(legacy) == len(df)
+    assert result.metrics["total_kwh"] == pytest.approx(legacy["Consumption"].sum(), abs=0.01)
+    assert result.metrics["period_start"] == legacy["Reading Date"].min().isoformat()
+
+
+def test_original_csv_layout_header_on_first_row():
+    df = make_frame(days=7, freq="1h")
+    result = run(read_table(to_csv(df, header=("Date", "Consumption")), "export.csv"))
+    assert result.quality["rows_used"] == len(df)
+    assert result.metrics["total_kwh"] == pytest.approx(df["consumption"].sum(), abs=0.01)
+
+
 def test_missing_columns_error_names_what_was_found():
     with pytest.raises(AnalysisError, match="Reading, Value"):
         read_table(b"Reading,Value\n1,2\n", "meter.csv")
@@ -124,8 +160,97 @@ def test_anomalies_use_time_of_week_baseline():
     result = run(df)
     assert result.df.loc[result.df["datetime"] == df.loc[night, "datetime"], "anomaly"].item() == 1
     assert result.df.loc[result.df["datetime"] == df.loc[midday, "datetime"], "anomaly"].item() == -1
-    assert result.metrics["anomalies_high"] + result.metrics["anomalies_low"] < 20
+    assert (result.metrics["anomaly_events_high"], result.metrics["anomaly_events_low"]) == (1, 1)
     assert result.metrics["anomaly_basis"] == "hour of week"
+
+
+def test_consecutive_flagged_readings_become_one_event():
+    df = make_frame()
+    start = df.index[df["datetime"] == "2026-06-10 02:00"][0]
+    df.loc[start : start + 7, "consumption"] = 15.0  # two hours at 15 instead of ~5
+    df.loc[start + 3, "consumption"] = 5.0  # one normal reading inside the run
+
+    result = run(df, tariff=0.5)
+    assert len(result.events) == 1
+    event = result.events[0]
+    assert (event["start"], event["end"]) == ("2026-06-10T02:00:00", "2026-06-10T04:00:00")
+    assert (event["direction"], event["duration_minutes"], event["readings"]) == ("high", 120, 8)
+    assert event["excess_kwh"] == pytest.approx(70, abs=3)  # 7 readings x ~10 kWh
+    assert event["cost"] == pytest.approx(event["excess_kwh"] * 0.5, abs=0.01)
+    assert result.metrics["anomaly_excess_kwh"] == event["excess_kwh"]
+
+
+def test_mild_one_off_readings_are_not_events():
+    df = make_frame()
+    blip = df.index[df["datetime"] == "2026-06-10 02:00"][0]
+    df.loc[blip, "consumption"] = 7.5  # flagged as a reading, but a lone mild blip
+
+    result = run(df)
+    assert result.events == []
+    assert (result.df["anomaly"] == 0).all()
+
+
+def test_events_are_ordered_by_size():
+    df = make_frame()
+    small = df.index[df["datetime"] == "2026-06-10 02:00"][0]
+    large = df.index[df["datetime"] == "2026-06-17 02:00"][0]
+    df.loc[small : small + 1, "consumption"] = 15.0
+    df.loc[large : large + 5, "consumption"] = 25.0
+
+    events = run(df).events
+    assert [e["start"] for e in events] == ["2026-06-17T02:00:00", "2026-06-10T02:00:00"]
+
+
+# --- day profiles ------------------------------------------------------------
+def test_day_profiles_separate_weekdays_from_weekends():
+    profiles = run(make_frame()).day_profiles
+
+    assert [(p["days"], p["description"]) for p in profiles["profiles"]] == [
+        (20, "mostly weekdays"),
+        (8, "mostly weekends"),
+    ]
+    assert profiles["profiles"][0]["avg_daily_kwh"] == pytest.approx(10 * 80 + 14 * 20, rel=0.02)
+    assert profiles["unusual_days"] == []
+    assert len(profiles["assignments"]) == 28
+
+
+def test_weekday_that_ran_like_a_weekend_is_unusual():
+    df = make_frame()
+    holiday = df["datetime"].dt.date == pd.Timestamp("2026-06-17").date()  # a Wednesday
+    df.loc[holiday, "consumption"] = 5.0
+
+    unusual = run(df).day_profiles["unusual_days"]
+    assert [(d["date"], d["day"], d["reason"]) for d in unusual] == [
+        ("2026-06-17", "Wed", "Weekday that ran like a weekend")
+    ]
+    assert unusual[0]["compared_to"] == "A"
+    assert unusual[0]["diff_pct"] == pytest.approx(-55.6, abs=2)
+
+
+def test_day_unlike_any_profile_is_unusual_and_described():
+    df = make_frame()
+    evening = (df["datetime"] >= "2026-06-18 19:00") & (df["datetime"] < "2026-06-18 23:00")
+    df.loc[evening, "consumption"] = 30.0  # plant left running through the evening
+
+    unusual = run(df).day_profiles["unusual_days"]
+    assert len(unusual) == 1
+    assert unusual[0]["reason"] == "Unlike any typical profile"
+    assert unusual[0]["main_difference"].startswith("19:00-23:00 (+")
+
+
+def test_uniform_days_form_a_single_profile():
+    index = pd.date_range("2026-06-01", periods=14 * 96, freq="15min")
+    noise = np.random.default_rng(1).normal(0, 0.2, len(index))
+    profiles = run(pd.DataFrame({"datetime": index, "consumption": 10 + noise})).day_profiles
+
+    assert len(profiles["profiles"]) == 1
+    assert profiles["profiles"][0]["days"] == 14
+
+
+def test_day_profiles_skipped_when_too_short():
+    result = run(make_frame(days=5))
+    assert result.day_profiles is None
+    assert build_pdf(result).startswith(b"%PDF")
 
 
 def test_busiest_cell_comes_from_the_heatmap_not_one_spike():
@@ -166,6 +291,8 @@ def test_api_returns_metrics_and_pdf():
     assert response.status_code == 200
     assert body["metrics"]["tariff"] == 0.3
     assert body["pdf_base64"].startswith("JVBERi")  # "%PDF-"
+    assert body["events"] == []
+    assert len(body["day_profiles"]["profiles"]) == 2
     assert len(response.content) < 4_000_000  # stays under Vercel's response limit
 
 
